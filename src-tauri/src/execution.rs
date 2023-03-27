@@ -64,6 +64,7 @@ impl ResumeResult {
             Some(SyscallResult::Terminated(code)) => ResumeMode::Finished {
                 pc: frame.registers.pc, code: Some(code)
             },
+            Some(SyscallResult::Aborted) => ResumeMode::Paused,
             Some(SyscallResult::Exception(error)) => ResumeMode::Invalid {
                 message: error.to_string()
             },
@@ -106,30 +107,8 @@ fn flush_display(memory: &mut MemoryType, state: tauri::State<'_, FlushDisplayBo
 
 #[tauri::command]
 pub async fn resume(
-    breakpoints: Vec<u32>,
-    state: tauri::State<'_, DebuggerBody>,
-    display: tauri::State<'_, FlushDisplayBody>
-) -> Result<ResumeResult, ()> {
-    let (
-        debugger, state, finished_pcs
-    ) = lock_and_clone(state).ok_or(())?;
-
-    let debugger_clone = debugger.clone();
-    let breakpoints_set = HashSet::from_iter(breakpoints.iter().copied());
-
-    debugger.lock().unwrap().set_breakpoints(breakpoints_set);
-
-    let (frame, result) = tokio::spawn(async move {
-        SyscallDelegate::new(state).run(&debugger).await
-    }).await.unwrap();
-
-    flush_display(debugger_clone.lock().unwrap().memory(), display);
-
-    Ok(ResumeResult::from_frame(frame, &finished_pcs, result))
-}
-
-#[tauri::command]
-pub async fn step(
+    count: Option<u32>,
+    breakpoints: Option<Vec<u32>>,
     state: tauri::State<'_, DebuggerBody>,
     display: tauri::State<'_, FlushDisplayBody>
 ) -> Result<ResumeResult, ()> {
@@ -139,7 +118,32 @@ pub async fn step(
 
     let debugger_clone = debugger.clone();
 
-    let (frame, result) = SyscallDelegate::new(state).cycle(&debugger).await;
+    if let Some(breakpoints) = breakpoints {
+        let breakpoints_set = HashSet::from_iter(breakpoints.iter().copied());
+
+        debugger.lock().unwrap().set_breakpoints(breakpoints_set);
+    }
+
+    // Ensure the cancel token hasn't been set previously.
+    state.lock().unwrap().renew();
+
+    let delegate = SyscallDelegate::new(state);
+
+    let (frame, result) = {
+        if let Some(count) = count {
+            for _ in 0 .. count - 1 {
+                delegate.cycle(&debugger).await;
+            }
+
+            if count > 0 {
+                delegate.cycle(&debugger).await
+            } else {
+                return Err(())
+            }
+        } else {
+            delegate.run(&debugger).await
+        }
+    };
 
     flush_display(debugger_clone.lock().unwrap().memory(), display);
 
@@ -153,10 +157,10 @@ pub fn pause(
 ) {
     let Some(pointer) = &*state.lock().unwrap() else { return };
 
-    let mut debugger = pointer.debugger.lock().unwrap();
-    debugger.pause();
+    pointer.debugger.lock().unwrap().pause();
+    pointer.delegate.lock().unwrap().cancel();
 
-    flush_display(debugger.memory(), display)
+    flush_display(pointer.debugger.lock().unwrap().memory(), display);
 }
 
 #[tauri::command]

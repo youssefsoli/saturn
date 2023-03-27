@@ -3,7 +3,7 @@ import { computed, ComputedRef } from 'vue'
 import { MergeSuggestion, SuggestionsInterface } from './suggestions'
 import { SizeCalculator } from './query/text-size'
 import { consumeBackwards, consumeDirection, consumeForwards } from './query/alt-consume'
-import { hasActionKey } from './query/shortcut-key'
+import { hasActionKey, hasAltKey } from './query/shortcut-key'
 import { selectionRange, CursorState } from './tabs'
 import { EditorSettings } from './settings'
 import { grabWhitespace } from './languages/language'
@@ -29,7 +29,7 @@ export interface CursorInterface {
   getSelection(): string | null
   dropSelection(): void
   pasteText(text: string): void
-  dropCursor(x: number, y: number, detail?: number): void
+  dropCursor(x: number, y: number, detail?: number, shift?: boolean): void
   dragTo(x: number, y: number): void
   cursorCoordinates(x: number, y: number): SelectionIndex
   lineStart(line: number): number
@@ -383,18 +383,21 @@ export function useCursor(
       }
     } else {
       const alignment = settings.tabSize
-      const tabs = ' '.repeat(alignment)
 
       if (region) {
+        const tabs = ' '.repeat(alignment)
+
         for (let line = region.startLine; line <= region.endLine; line++) {
           editor().put({ line, index: 0 }, tabs)
 
           adjustCursor(line, +alignment)
         }
       } else {
-        editor().put(value, tabs)
+        const spaces = settings.tabSize - (value.index % settings.tabSize)
 
-        putCursor({ line: value.line, index: value.index + alignment })
+        editor().put(value, ' '.repeat(spaces))
+
+        putCursor({ line: value.line, index: value.index + spaces })
       }
     }
   }
@@ -541,6 +544,10 @@ export function useCursor(
         break
 
       case 'z': {
+        if (event.shiftKey) {
+          return // do nothing, ignore "redo"
+        }
+
         const frame = editor().undo()
 
         suggestions?.dismissSuggestions()
@@ -563,11 +570,11 @@ export function useCursor(
 
     switch (event.key) {
       case 'ArrowLeft':
-        moveLeft(event.altKey, event.shiftKey)
+        moveLeft(hasAltKey(event), event.shiftKey)
         break
 
       case 'ArrowRight':
-        moveRight(event.altKey, event.shiftKey)
+        moveRight(hasAltKey(event), event.shiftKey)
         break
 
       case 'ArrowDown':
@@ -588,8 +595,18 @@ export function useCursor(
         break
 
       case 'Tab':
-        hitTab(event.shiftKey)
         event.preventDefault()
+
+        if (!event.shiftKey && suggestions && suggestions.flushSuggestions()) {
+          const suggestion = suggestions.mergeSuggestion()
+
+          if (suggestion) {
+            return applyMergeSuggestion(suggestion)
+          }
+        } else {
+          hitTab(event.shiftKey)
+        }
+
         break
 
       case 'Backspace':
@@ -607,9 +624,9 @@ export function useCursor(
           let nextPosition: SelectionIndex
 
           if (doDelete) {
-            nextPosition = editor().deleteForwards(value, event.altKey)
+            nextPosition = editor().deleteForwards(value, hasAltKey(event))
           } else {
-            nextPosition = editor().backspace(value, event.altKey, settings.tabSize)
+            nextPosition = editor().backspace(value, hasAltKey(event), settings.tabSize)
           }
 
           putCursor(nextPosition)
@@ -678,7 +695,7 @@ export function useCursor(
     return { line, index }
   }
 
-  function dropCursor(x: number, y: number, detail?: number) {
+  function dropCursor(x: number, y: number, detail?: number, shift?: boolean) {
     const index = cursorCoordinates(x, y)
 
     if (detail === 2) {
@@ -716,7 +733,16 @@ export function useCursor(
       putCursor(end, current)
       current.highlight = alignCursor(start)
     } else {
-      cursor().highlight = null
+      const value = cursor()
+
+      if (shift) {
+        if (!value.highlight) {
+          value.highlight = { line: value.line, index: value.index }
+        }
+      } else {
+        value.highlight = null
+      }
+
       editor().commit()
       suggestions?.dismissSuggestions()
 

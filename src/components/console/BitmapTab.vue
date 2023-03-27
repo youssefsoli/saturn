@@ -7,36 +7,54 @@
       @click="focusSelf"
       @keydown="e => handleKey(e, false)"
       @keyup="e => handleKey(e, true)"
-      class="outline-none overflow-visible focus:ring-4 border border-neutral-700 rounded h-full shrink-0 mx-auto md:mx-0 max-w-full"
+      class="outline-none overflow-visible focus:ring-4 border border-neutral-700 rounded h-full shrink-0 max-w-full"
       :style="{ width: `${correctedWidth}px` }"
+      :class="{ 'mx-auto sm:mx-0': !state.small, 'mx-auto': state.small }"
     >
       <canvas
         ref="canvas"
         class="w-full h-full bitmap-display rounded"
-        :width="settings.bitmap.width * 4"
-        :height="settings.bitmap.height * 4"
+        :width="config.width"
+        :height="config.height"
       />
     </button>
 
-    <div class="p-4 hidden md:block flex flex-col content-center justify-center items-center align-center">
+    <div
+      class="p-4 hidden flex flex-col content-center justify-center items-center align-center"
+      :class="{ 'sm:block': !state.small }"
+    >
       <div class="text-lg font-light mb-4 flex items-center">
         Bitmap Display
       </div>
 
       <div class="text-neutral-300 ml-2">
         <div class="py-1">
-          <label for="bitmap-width" class="inline-block font-bold pr-4 w-32">Display Width</label>
-          <NumberField id="bitmap-width" v-model="settings.bitmap.width" :checker="sizeCheck" classes="text-xs" />
+          <label class="inline-block font-bold pr-4 w-32">Display Width</label>
+
+          <NumberField v-model="settings.bitmap.displayWidth" :clean-only="true" :checker="sizeCheck" classes="text-xs w-32" />
+
+          <span class="text-neutral-400 mx-3 text-xs font-bold">
+            Units
+          </span>
+
+          <NumberField v-model="settings.bitmap.unitWidth" :clean-only="true" :checker="unitCheck" classes="text-xs w-20" />
         </div>
 
         <div class="py-1">
-          <label for="bitmap-height" class="inline-block font-bold pr-4 w-32">Display Height</label>
-          <NumberField id="bitmap-height" v-model="settings.bitmap.height" :checker="sizeCheck" classes="text-xs" />
+          <label class="inline-block font-bold pr-4 w-32">Display Height</label>
+
+          <NumberField v-model="settings.bitmap.displayHeight" :clean-only="true" :checker="sizeCheck" classes="text-xs w-32" />
+
+          <span class="text-neutral-400 mx-3 text-xs font-bold">
+            Units
+          </span>
+
+          <NumberField v-model="settings.bitmap.unitHeight" :clean-only="true" :checker="unitCheck" classes="text-xs w-20" />
         </div>
 
         <div class="py-1">
-          <label for="bitmap-address" class="inline-block font-bold pr-4 w-32">Address</label>
-          <NumberField id="bitmap-address" v-model="settings.bitmap.address" :hex="true" :checker="memoryCheck" classes="text-xs" />
+          <label class="inline-block font-bold pr-4 w-32">Address</label>
+          <NumberField v-model="settings.bitmap.address" :hex="true" :checker="memoryCheck" classes="text-xs w-32" />
 
           <button
             class="rounded px-2 py-1 border border-neutral-700 font-bold text-xs ml-4 active:bg-slate-700"
@@ -80,7 +98,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import { ArrowLeftIcon } from '@heroicons/vue/24/solid'
 import { ExclamationCircleIcon } from '@heroicons/vue/24/outline'
@@ -90,17 +108,21 @@ import { settings } from '../../state/state'
 import NumberField from './NumberField.vue'
 import { convertFileSrc } from '@tauri-apps/api/tauri'
 import { ExecutionState, lastDisplay } from '../../utils/mips'
+import { displayConfig } from '../../utils/settings'
 
 const wrapper = ref(null as HTMLElement | null)
 const canvas = ref(null as HTMLCanvasElement | null)
 
 const gp = 0x10008000
 
-let lastHeight = settings.bitmap.height
-const correctedWidth = ref(settings.bitmap.width)
+const config = computed(() => displayConfig(settings.bitmap))
+
+let lastHeight = config.value.height
+const correctedWidth = ref(config.value.width)
 
 const state = reactive({
   interval: null as number | null,
+  small: false as boolean,
   useProtocol: true
 })
 
@@ -124,12 +146,23 @@ function sizeCheck(value: number): string | null {
   return null
 }
 
+function unitCheck(value: number): string | null {
+  if (value <= 0 || value > 32) {
+    return 'This field must be in the 1-32 range'
+  }
+
+  return null
+}
+
 function mapKey(key: string): string | null {
-  if (key.length <= 1) {
-    return key
+  const lower = key.toLowerCase()
+
+  if (lower.length <= 1) {
+    return lower
   } else {
     switch (key) {
       case 'Enter': return '\n'
+      case 'Space': return ' '
       default: return null
     }
   }
@@ -154,9 +187,11 @@ function focusSelf() {
 let observer = null as ResizeObserver | null
 
 function fixWidth(height: number) {
-  const width = height / settings.bitmap.height * settings.bitmap.width
+  const width = height / config.value.height * config.value.width
 
   lastHeight = height
+
+  state.small = height < 140
 
   // Should not re-trigger this statement.
   correctedWidth.value = width
@@ -195,8 +230,7 @@ onUnmounted(() => {
   }
 })
 
-watch(() => settings.bitmap.width, recheckWidth)
-watch(() => settings.bitmap.height, recheckWidth)
+watch(() => settings.bitmap, recheckWidth, { deep: true })
 
 function checkConnected() {
   if (consoleData.execution) {
@@ -220,8 +254,7 @@ watch(() => consoleData.execution, checkConnected)
 async function renderFrameFallback(context: CanvasRenderingContext2D, execution: ExecutionState) {
   const memory = await execution.memoryAt(0x10008000, 64 * 64 * 4)
 
-  const width = settings.bitmap.width
-  const height = settings.bitmap.height
+  const { width, height } = config.value
 
   const pixels = width * height * 4
 
@@ -243,20 +276,12 @@ async function renderFrameFallback(context: CanvasRenderingContext2D, execution:
     data.data[i + 3] = 255
   }
 
-  const resizeWidth = width * 4
-  const resizeHeight = height * 4
-
-  const image = await createImageBitmap(data, {
-    resizeWidth, resizeHeight,
-    resizeQuality: 'pixelated'
-  })
-
-  context.drawImage(image, 0, 0, resizeWidth, resizeHeight)
+  context.putImageData(data, 0, 0)
 }
 
 const protocol = convertFileSrc('', 'display')
 
-async function renderOrdered(
+function renderOrdered(
   context: CanvasRenderingContext2D,
   width: number, height: number, memory: Uint8Array
 ) {
@@ -266,20 +291,11 @@ async function renderOrdered(
     data.data[a] = memory[a]
   }
 
-  const resizeWidth = width * 4
-  const resizeHeight = height * 4
-
-  const image = await createImageBitmap(data, {
-    resizeWidth, resizeHeight,
-    resizeQuality: 'pixelated'
-  })
-
-  context.drawImage(image, 0, 0, resizeWidth, resizeHeight)
+  context.putImageData(data, 0, 0)
 }
 
 async function renderFrameProtocol(context: CanvasRenderingContext2D) {
-  const width = settings.bitmap.width
-  const height = settings.bitmap.height
+  const { width, height } = config.value
 
   const result = await fetch(protocol, {
     headers: {
@@ -293,7 +309,7 @@ async function renderFrameProtocol(context: CanvasRenderingContext2D) {
 
   const memory = new Uint8Array(await result.arrayBuffer())
 
-  await renderOrdered(context, width, height, memory)
+  renderOrdered(context, width, height, memory)
 }
 
 async function renderLastDisplay(context: CanvasRenderingContext2D) {
